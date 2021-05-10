@@ -3,7 +3,8 @@ from iqoptionapi.api import IQOptionAPI
 import iqoptionapi.constants as OP_code
 import iqoptionapi.country_id as Country
 import threading
-import time, json
+import time
+import json
 import logging
 import operator
 import iqoptionapi.global_value as global_value
@@ -22,7 +23,7 @@ def nested_dict(n, type):
 
 
 class IQ_Option:
-    __version__ = "6.8.9.1"
+    __version__ = "7.0.0"
 
     def __init__(self, email, password, active_account_type="PRACTICE"):
         self.size = [1, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800,
@@ -286,16 +287,17 @@ class IQ_Option:
         binary_data = self.get_all_init_v2()
         binary_list = ["binary", "turbo"]
         for option in binary_list:
-            for actives_id in binary_data[option]["actives"]:
-                active = binary_data[option]["actives"][actives_id]
-                name = str(active["name"]).split(".")[1]
-                if active["enabled"] == True:
-                    if active["is_suspended"] == True:
-                        OPEN_TIME[option][name]["open"] = False
+            if option in binary_data:
+                for actives_id in binary_data[option]["actives"]:
+                    active = binary_data[option]["actives"][actives_id]
+                    name = str(active["name"]).split(".")[1]
+                    if active["enabled"] == True:
+                        if active["is_suspended"] == True:
+                            OPEN_TIME[option][name]["open"] = False
+                        else:
+                            OPEN_TIME[option][name]["open"] = True
                     else:
-                        OPEN_TIME[option][name]["open"] = True
-                else:
-                    OPEN_TIME[option][name]["open"] = active["enabled"]
+                        OPEN_TIME[option][name]["open"] = active["enabled"]
 
         # for digital
         digital_data = self.get_digital_underlying_list_data()["underlying"]
@@ -770,7 +772,7 @@ class IQ_Option:
         while True:
             result = self.get_optioninfo_v2(10)
             if result['msg']['closed_options'][0]['id'][0] == id_number and result['msg']['closed_options'][0]['id'][0] != None:
-                return result['msg']['closed_options'][0]['win'], (result['msg']['closed_options'][0]['win_amount']-result['msg']['closed_options'][0]['amount'] if result['msg']['closed_options'][0]['win'] != 'equal' else 0)
+                return result['msg']['closed_options'][0]['win'], (result['msg']['closed_options'][0]['win_amount'] - result['msg']['closed_options'][0]['amount'] if result['msg']['closed_options'][0]['win'] != 'equal' else 0)
                 break
             time.sleep(1)
 
@@ -1019,13 +1021,14 @@ class IQ_Option:
         # And need to be on GMT time
 
         # Type - P or C
+        action = action.lower()
         if action == 'put':
             action = 'P'
         elif action == 'call':
             action = 'C'
         else:
             logging.error('buy_digital_spot active error')
-            return -1
+            return -1, None
         # doEURUSD201907191250PT5MPSPT
         timestamp = int(self.api.timesync.server_timestamp)
         if duration == 1:
@@ -1532,3 +1535,63 @@ class IQ_Option:
             self.api.Get_Users_Availability(user_id)
             time.sleep(0.2)
         return self.api.users_availability
+
+    def get_digital_payout(self, active):
+        self.api.digital_payout = None
+        asset_id = OP_code.ACTIVES[active]
+
+        self.api.subscribe_digital_price_splitter(asset_id)
+
+        while self.api.digital_payout is None:
+            pass
+
+        self.api.unsubscribe_digital_price_splitter(asset_id)
+
+        return self.api.digital_payout
+
+    def logout(self):
+        self.api.logout()
+
+    def buy_digital_spot_v2(self, active, amount, action, duration):
+        action = action.lower()
+
+        if action == 'put':
+            action = 'P'
+        elif action == 'call':
+            action = 'C'
+        else:
+            logging.error('buy_digital_spot_v2 active error')
+            return -1, None
+
+        timestamp = int(self.api.timesync.server_timestamp)
+
+        if duration == 1:
+            exp, _ = get_expiration_time(timestamp, duration)
+        else:
+            now_date = datetime.fromtimestamp(
+                timestamp) + timedelta(minutes=1, seconds=30)
+
+            while True:
+                if now_date.minute % duration == 0 and time.mktime(now_date.timetuple()) - timestamp > 30:
+                    break
+                now_date = now_date + timedelta(minutes=1)
+
+            exp = time.mktime(now_date.timetuple())
+
+        date_formated = str(datetime.utcfromtimestamp(exp).strftime("%Y%m%d%H%M"))
+        active_id = str(OP_code.ACTIVES[active])
+        instrument_id = "do" + active_id + "A" + \
+            date_formated[:8] + "D" + date_formated[8:] + \
+            "00T" + str(duration) + "M" + action + "SPT"
+        logger = logging.getLogger(__name__)
+        logger.info(instrument_id)
+        request_id = self.api.place_digital_option_v2(instrument_id, active_id, amount)
+
+        while self.api.digital_option_placed_id.get(request_id) is None:
+            pass
+
+        digital_order_id = self.api.digital_option_placed_id.get(request_id)
+        if isinstance(digital_order_id, int):
+            return True, digital_order_id
+        else:
+            return False, digital_order_id
